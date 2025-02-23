@@ -1,151 +1,99 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 
-# Simulation Parameters
-n_agents = 100              # Number of agents
-n_rounds = 500              # Number of rounds
-endowment = 10              # Initial endowment per round
-contribution_choices = np.arange(0, 10.5, 0.5)  # Contribution options: 0 to 10 in steps of 0.5
-r = 100                     # Public good multiplication factor (MPCR = 1)
-lambda_trust = 0.4          # Trust memory parameter (more responsive)
-eta = 1.5                   # Trust weight in utility
-alpha = 1.5                 # Fairness parameter (disadvantageous inequity)
-beta = 0.75                 # Fairness parameter (advantageous inequity)
-gamma = 0.8                 # Social pressure weight
-rlhf_frequency = 10         # Apply RLHF every 10 rounds
-rlhf_boost = 0.3            # RLHF boost factor for Q-values
+# Parameters
+NUM_AGENTS = 100
+NUM_ROUNDS = 500
+MAX_CONTRIBUTION = 10
+ALPHA = 2.0  # Increased fairness penalty (disadvantageous inequity), was 1.5
+BETA = 1.0   # Increased fairness penalty (advantageous inequity), was 0.75
+GAMMA = 1.0  # Increased social pressure weight, was 0.8
+R = 75       # Reduced public good return (MPCR = 0.75), was 100
+EPSILON = 0.05  # Reduced exploration rate, was 0.1
+LAMBDA = 0.6    # Increased trust memory for slower updates, was 0.4
+INITIAL_RLHF_BOOST = 0.1  # Reduced initial RLHF boost, was 0.3
 
-# Q-learning Parameters
-alpha_q = 0.1               # Learning rate for Q-learning
-gamma_q = 0.9               # Discount factor for Q-learning
-epsilon = 0.1               # Exploration rate for epsilon-greedy policy
+# Initialize agents' Q-tables, contributions, trust, and tracking arrays
+q_tables = np.zeros((NUM_AGENTS, MAX_CONTRIBUTION + 1))  # Q-values for each contribution level
+contributions = np.random.randint(0, MAX_CONTRIBUTION + 1, NUM_AGENTS)
+trust = np.zeros(NUM_AGENTS)  # Initial trust starts at 0
+avg_contributions = []
+avg_trust = []
+payoff_variances = []
 
-# Agent Class Definition
-class Agent:
-    def __init__(self):
-        self.trust = 0.2                    # Initial trust level
-        self.q_table = np.zeros(len(contribution_choices))  # Q-values for each contribution
-        self.contribution_history = []      # Track contributions over time
+# Utility function with fairness, social pressure, and equity reward
+def behavioral_utility(contribution, payoff, avg_payoff, avg_contribution):
+    # Base payoff: keep what you didn't contribute + share of public good
+    personal_payoff = MAX_CONTRIBUTION - contribution + payoff
+    # Fairness utility (penalize inequity)
+    if personal_payoff < avg_payoff:
+        fairness_utility = -ALPHA * (avg_payoff - personal_payoff)
+    else:
+        fairness_utility = -BETA * (personal_payoff - avg_payoff)
+    # Social pressure utility (align with group contribution)
+    social_pressure_utility = -GAMMA * abs(contribution - avg_contribution)
+    # Equity reward (reward closeness to average payoff)
+    equity_reward = 0.5 * (1 - abs(personal_payoff - avg_payoff) / max(personal_payoff, avg_payoff, 1e-6))
+    return personal_payoff + fairness_utility + social_pressure_utility + equity_reward
 
-# Utility Functions
-def rational_utility(c_i, total_contributions):
-    """Calculate rational utility based on contribution and public good return."""
-    public_return = (r * total_contributions) / n_agents
-    return endowment - c_i + public_return
+# Simulation loop
+for round_num in range(NUM_ROUNDS):
+    # Apply initial RLHF boost only at round 0
+    if round_num == 0:
+        q_tables += INITIAL_RLHF_BOOST * np.random.random(q_tables.shape)
 
-def trust_utility(c_i, trust):
-    """Calculate utility from trust in others' contributions."""
-    return eta * trust * c_i
+    # Agents choose contributions
+    for i in range(NUM_AGENTS):
+        if np.random.random() < EPSILON:  # Exploration
+            contributions[i] = np.random.randint(0, MAX_CONTRIBUTION + 1)
+        else:  # Exploitation
+            contributions[i] = np.argmax(q_tables[i])
 
-def fairness_utility(p_i, p_mean):
-    """Calculate utility penalty from inequity in payoffs."""
-    return -alpha * max(p_mean - p_i, 0) - beta * max(p_i - p_mean, 0)
+    # Calculate public good and individual payoffs
+    total_contribution = np.sum(contributions)
+    public_good = (R / NUM_AGENTS) * total_contribution  # MPCR = R / NUM_AGENTS = 0.75
+    payoffs = public_good / NUM_AGENTS  # Equal share of public good
 
-def social_pressure_utility(c_i, c_mean):
-    """Calculate utility from aligning with average contribution."""
-    return gamma * (1 - abs(c_i - c_mean) / max(contribution_choices))
+    # Update trust and Q-tables
+    avg_contribution = np.mean(contributions)
+    avg_payoff = np.mean([MAX_CONTRIBUTION - c + payoffs for c in contributions])
+    for i in range(NUM_AGENTS):
+        # Calculate utility
+        utility = behavioral_utility(contributions[i], payoffs, avg_payoff, avg_contribution)
+        # Update Q-table (simplified Q-learning update)
+        q_tables[i, contributions[i]] = (1 - 0.1) * q_tables[i, contributions[i]] + 0.1 * utility
+        # Update trust based on contribution alignment
+        trust[i] = LAMBDA * trust[i] + (1 - LAMBDA) * (1 - abs(contributions[i] - avg_contribution) / MAX_CONTRIBUTION)
 
-def behavioral_utility(c_i, total_contributions, trust, p_i, p_mean, c_mean):
-    """Combine rational and behavioral utilities."""
-    u_rat = rational_utility(c_i, total_contributions)
-    u_trust = trust_utility(c_i, trust)
-    u_fair = fairness_utility(p_i, p_mean)
-    u_soc = social_pressure_utility(c_i, c_mean)
-    return u_rat + u_trust + u_fair + u_soc
-
-# Initialize Agents
-agents = [Agent() for _ in range(n_agents)]
-
-# Data Tracking
-contributions_over_time = []
-trust_over_time = []
-payoff_variance_over_time = []
-
-# Run Simulation
-for t in range(n_rounds):
-    # Agents choose contributions using Q-learning
-    contributions = []
-    for agent in agents:
-        if np.random.rand() < epsilon:
-            # Exploration: random contribution
-            c_i = np.random.choice(contribution_choices)
-        else:
-            # Exploitation: choose best action from Q-table
-            c_i = contribution_choices[np.argmax(agent.q_table)]
-        contributions.append(c_i)
-        agent.contribution_history.append(c_i)
-    
-    # Calculate totals and averages
-    total_contributions = sum(contributions)
-    c_mean = np.mean(contributions)
-    payoffs = [rational_utility(c_i, total_contributions) for c_i in contributions]
-    p_mean = np.mean(payoffs)
-    
-    # Update agents' trust and Q-tables
-    for i, agent in enumerate(agents):
-        # Update trust based on group average contribution
-        group_avg_contribution = total_contributions / n_agents
-        agent.trust = lambda_trust * agent.trust + (1 - lambda_trust) * (group_avg_contribution / max(contribution_choices))
-        
-        # Calculate total utility with behavioral factors
-        u_beh = behavioral_utility(contributions[i], total_contributions, agent.trust, payoffs[i], p_mean, c_mean)
-        
-        # Update Q-table using Q-learning
-        action_idx = np.where(contribution_choices == contributions[i])[0][0]
-        max_future_q = np.max(agent.q_table)
-        agent.q_table[action_idx] = (1 - alpha_q) * agent.q_table[action_idx] + alpha_q * (u_beh + gamma_q * max_future_q)
-    
-    # Apply RLHF periodically
-    if t % rlhf_frequency == 0:
-        for agent in agents:
-            for idx, c in enumerate(contribution_choices):
-                agent.q_table[idx] += rlhf_boost * c  # Boost Q-values for higher contributions
-    
-    # Apply initial RLHF boost at round 0
-    if t == 0:
-        for agent in agents:
-            for idx, c in enumerate(contribution_choices):
-                agent.q_table[idx] += rlhf_boost * c
-    
     # Record metrics
-    contributions_over_time.append(np.mean(contributions))
-    trust_over_time.append(np.mean([agent.trust for agent in agents]))
-    payoff_variance_over_time.append(np.var(payoffs))
+    avg_contributions.append(avg_contribution)
+    avg_trust.append(np.mean(trust))
+    payoffs_array = np.array([MAX_CONTRIBUTION - c + payoffs for c in contributions])
+    payoff_variances.append(np.var(payoffs_array))
 
-# Save Results to CSV
-data = pd.DataFrame({
-    'Round': range(n_rounds),
-    'Average_Contribution': contributions_over_time,
-    'Average_Trust': trust_over_time,
-    'Payoff_Variance': payoff_variance_over_time
-})
-data.to_csv('simulation_results_final.csv', index=False)
+# Plot results
+plt.figure(figsize=(10, 12))
 
-# Plot Results
-plt.figure(figsize=(12, 8))
-
-# Average Contribution Plot
 plt.subplot(3, 1, 1)
-plt.plot(contributions_over_time, color='blue')
-plt.title('Average Contribution Over Time')
-plt.xlabel('Round')
-plt.ylabel('Average Contribution')
+plt.plot(avg_contributions, color='blue')
+plt.title("Average Contribution Over Time")
+plt.xlabel("Round")
+plt.ylabel("Average Contribution")
+plt.ylim(0, MAX_CONTRIBUTION + 2)
 
-# Average Trust Plot
 plt.subplot(3, 1, 2)
-plt.plot(trust_over_time, color='green')
-plt.title('Average Trust Over Time')
-plt.xlabel('Round')
-plt.ylabel('Average Trust')
+plt.plot(avg_trust, color='green')
+plt.title("Average Trust Over Time")
+plt.xlabel("Round")
+plt.ylabel("Average Trust")
+plt.ylim(0, 1)
 
-# Payoff Variance Plot
 plt.subplot(3, 1, 3)
-plt.plot(payoff_variance_over_time, color='magenta')
-plt.title('Payoff Variance Over Time')
-plt.xlabel('Round')
-plt.ylabel('Payoff Variance')
+plt.plot(payoff_variances, color='magenta')
+plt.title("Payoff Variance Over Time")
+plt.xlabel("Round")
+plt.ylabel("Payoff Variance")
+plt.ylim(0, 10)
 
 plt.tight_layout()
-plt.savefig('simulation_plots_final.png')
 plt.show()
