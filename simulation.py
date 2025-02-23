@@ -6,15 +6,15 @@ import pandas as pd
 n_agents = 100              # Number of agents
 n_rounds = 500              # Number of rounds
 endowment = 10              # Initial endowment per round
-contribution_choices = list(range(0, 11))  # Possible contributions: [0, 1, 2, ..., 10]
-r = 50                      # Public good multiplication factor
-lambda_trust = 0.5          # Trust memory parameter
-eta = 1.0                   # Trust weight in utility
-alpha = 1.0                 # Fairness parameter (disadvantageous inequity)
-beta = 0.5                  # Fairness parameter (advantageous inequity)
-gamma = 0.6                 # Social pressure weight
-rlhf_frequency = 25         # Apply RLHF every 25 rounds
-rlhf_boost = 0.2            # RLHF boost factor for Q-values
+contribution_choices = np.arange(0, 10.5, 0.5)  # Contribution options: 0 to 10 in steps of 0.5
+r = 100                     # Public good multiplication factor (MPCR = 1)
+lambda_trust = 0.4          # Trust memory parameter (more responsive)
+eta = 1.5                   # Trust weight in utility
+alpha = 1.5                 # Fairness parameter (disadvantageous inequity)
+beta = 0.75                 # Fairness parameter (advantageous inequity)
+gamma = 0.8                 # Social pressure weight
+rlhf_frequency = 10         # Apply RLHF every 10 rounds
+rlhf_boost = 0.3            # RLHF boost factor for Q-values
 
 # Q-learning Parameters
 alpha_q = 0.1               # Learning rate for Q-learning
@@ -92,15 +92,21 @@ for t in range(n_rounds):
         u_beh = behavioral_utility(contributions[i], total_contributions, agent.trust, payoffs[i], p_mean, c_mean)
         
         # Update Q-table using Q-learning
-        action_idx = contribution_choices.index(contributions[i])
+        action_idx = np.where(contribution_choices == contributions[i])[0][0]
         max_future_q = np.max(agent.q_table)
         agent.q_table[action_idx] = (1 - alpha_q) * agent.q_table[action_idx] + alpha_q * (u_beh + gamma_q * max_future_q)
     
     # Apply RLHF periodically
-    if (t + 1) % rlhf_frequency == 0:
+    if t % rlhf_frequency == 0:
         for agent in agents:
             for idx, c in enumerate(contribution_choices):
                 agent.q_table[idx] += rlhf_boost * c  # Boost Q-values for higher contributions
+    
+    # Apply initial RLHF boost at round 0
+    if t == 0:
+        for agent in agents:
+            for idx, c in enumerate(contribution_choices):
+                agent.q_table[idx] += rlhf_boost * c
     
     # Record metrics
     contributions_over_time.append(np.mean(contributions))
@@ -114,7 +120,7 @@ data = pd.DataFrame({
     'Average_Trust': trust_over_time,
     'Payoff_Variance': payoff_variance_over_time
 })
-data.to_csv('simulation_results_updated.csv', index=False)
+data.to_csv('simulation_results_final.csv', index=False)
 
 # Plot Results
 plt.figure(figsize=(12, 8))
@@ -141,5 +147,5 @@ plt.xlabel('Round')
 plt.ylabel('Payoff Variance')
 
 plt.tight_layout()
-plt.savefig('simulation_plots_updated.png')
+plt.savefig('simulation_plots_final.png')
 plt.show()
